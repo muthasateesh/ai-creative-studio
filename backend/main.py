@@ -33,8 +33,6 @@ app.include_router(animate.router, prefix="/api/animate", tags=["Animate"])
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIST_DIR = os.path.join(_HERE, "..", "frontend", "dist")
-if os.path.isdir(FRONTEND_DIST_DIR):
-    app.mount("/", StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name="frontend")
 
 
 @app.get("/api/health")
@@ -73,6 +71,10 @@ def delete_item(category: str, filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     os.remove(filepath)
     return {"deleted": filename}
+
+
+if os.path.isdir(FRONTEND_DIST_DIR):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name="frontend")
 
 
 @app.get("/{full_path:path}")
