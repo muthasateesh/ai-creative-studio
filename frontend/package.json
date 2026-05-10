@@ -1,0 +1,46 @@
+{
+  "name": "ai-creative-studio",
+  "version": "1.0.0",
+  "description": "AI Creative Studio - Generate images, videos, voice and music",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "node node_modules/vite/bin/vite.js",
+    "build": "node node_modules/vite/bin/vite.js build",
+    "preview": "node node_modules/vite/bin/vite.js preview",
+    "electron": "node node_modules/electron/cli.js .",
+    "electron:dev": "node node_modules/concurrently/dist/bin/concurrently.js \"npm run dev\" \"node node_modules/wait-on/bin/wait-on http://localhost:5173 && node node_modules/electron/cli.js .\"",
+    "electron:build": "npm run build"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lucide-react": "^0.378.0",
+    "axios": "^1.6.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.19",
+    "concurrently": "^8.2.2",
+    "electron": "^30.0.1",
+    "electron-builder": "^24.13.3",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.3",
+    "vite": "^5.2.11",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.aicreativestudio.app",
+    "productName": "AI Creative Studio",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "public/icon.ico"
+    }
+  }
+}
