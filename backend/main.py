@@ -1,6 +1,7 @@
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -29,6 +30,10 @@ app.include_router(videos.router, prefix="/api/videos", tags=["Videos"])
 app.include_router(voice.router, prefix="/api/voice", tags=["Voice"])
 app.include_router(audio.router, prefix="/api/audio", tags=["Audio"])
 app.include_router(animate.router, prefix="/api/animate", tags=["Animate"])
+
+FRONTEND_DIST_DIR = "../frontend/dist"
+if os.path.isdir(FRONTEND_DIST_DIR):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name="frontend")
 
 
 @app.get("/api/health")
@@ -67,6 +72,14 @@ def delete_item(category: str, filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     os.remove(filepath)
     return {"deleted": filename}
+
+
+@app.get("/{full_path:path}")
+def spa_fallback(full_path: str):
+    index_path = os.path.join(FRONTEND_DIST_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    raise HTTPException(status_code=404, detail="Frontend build not found")
 
 
 if __name__ == "__main__":

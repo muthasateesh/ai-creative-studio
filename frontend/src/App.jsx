@@ -8,7 +8,7 @@ import AudioGenerator from './components/AudioGenerator'
 import Gallery from './components/Gallery'
 import { Sparkles } from 'lucide-react'
 
-const API = 'http://localhost:8000'
+const API = import.meta.env.VITE_API_BASE_URL || window.location.origin
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('images')
