@@ -1,6 +1,6 @@
 import os
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -53,6 +53,20 @@ def gallery():
                 })
     items.sort(key=lambda x: x["created"], reverse=True)
     return {"items": items[:100]}
+
+
+@app.delete("/api/gallery/{category}/{filename}")
+def delete_item(category: str, filename: str):
+    if category not in ("images", "videos", "voice", "audio", "animations"):
+        raise HTTPException(status_code=400, detail="Invalid category")
+    # Reject any path traversal attempts
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    filepath = os.path.join("outputs", category, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    os.remove(filepath)
+    return {"deleted": filename}
 
 
 if __name__ == "__main__":

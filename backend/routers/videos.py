@@ -1,11 +1,13 @@
-"""Text-to-video: procedural animated scene renderer. No GPU / model download needed."""
-import math, os, threading, uuid
+"""Text-to-video: procedural animated scene renderer with agents, camera FX, voice + music."""
+import asyncio, math, os, subprocess, threading, uuid, wave
 from typing import Optional
 
+import edge_tts
 import imageio
+import imageio_ffmpeg
 import numpy as np
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from pydantic import BaseModel
 
 router  = APIRouter()
@@ -16,12 +18,24 @@ _tasks: dict = {}
 class VideoRequest(BaseModel):
     prompt: str
     negative_prompt: Optional[str] = ""
-    num_frames: int = 72
-    fps: int = 24
-    width: int  = 576
-    height: int = 320
-    steps: int  = 25          # kept for API compat, unused
+    num_frames: int = 240
+    fps: int        = 24
+    width: int      = 1280
+    height: int     = 720
+    steps: int      = 25          # kept for API compat, unused
     guidance_scale: float = 7.5
+    # agent & camera
+    agent:           str   = "auto"   # auto | cinematic | nature | cosmic | urban | abstract | fantasy | retro
+    camera_movement: str   = "auto"   # auto | slow_zoom | zoom_out | pan | dolly | handheld | orbit | static
+    # audio
+    voice_enabled:  bool  = False
+    voice_text:     str   = ""        # blank = use prompt
+    voice_name:     str   = "en-US-AriaNeural"
+    voice_rate:     str   = "+0%"
+    voice_pitch:    str   = "+0Hz"
+    music_enabled:  bool  = True
+    music_style:    str   = "auto"    # auto = pick by scene
+    music_volume:   float = 0.30
 
 # ── drawing helpers ────────────────────────────────────────────────────────────
 
@@ -493,39 +507,502 @@ def _detect(prompt: str) -> str:
     if any(k in low for k in ["water","lake","river","stream","waterfall"]): return "ocean"
     return "abstract"
 
+# ── scene → music mapping ──────────────────────────────────────────────────────
+
+_SCENE_MUSIC = {
+    "space":    "cinematic",
+    "ocean":    "calm",
+    "fire":     "epic",
+    "snow":     "calm",
+    "sunset":   "cinematic",
+    "city":     "electronic",
+    "forest":   "calm",
+    "music":    "upbeat",
+    "digital":  "electronic",
+    "abstract": "upbeat",
+}
+
+# ── agent definitions ──────────────────────────────────────────────────────────
+
+_AGENTS = {
+    "cinematic": {
+        "name": "Cinematic", "emoji": "🎬",
+        "desc": "Hollywood drama, letterbox & film grain",
+        "scenes": ["space","ocean","sunset","forest","city"],
+        "music": "cinematic", "camera": "slow_zoom",
+        "effects": ["warm_grade","vignette","film_grain","letterbox"],
+    },
+    "nature": {
+        "name": "Nature", "emoji": "🌿",
+        "desc": "Lush landscapes & soft organic light",
+        "scenes": ["forest","ocean","snow","sunset"],
+        "music": "calm", "camera": "pan",
+        "effects": ["warm_grade","vignette"],
+    },
+    "cosmic": {
+        "name": "Cosmic", "emoji": "🚀",
+        "desc": "Deep space, galaxies & nebulae",
+        "scenes": ["space"],
+        "music": "cinematic", "camera": "slow_zoom",
+        "effects": ["vignette","bloom"],
+    },
+    "urban": {
+        "name": "Urban", "emoji": "🏙️",
+        "desc": "City nights, neon glow & rain",
+        "scenes": ["city","digital"],
+        "music": "electronic", "camera": "dolly",
+        "effects": ["cool_grade","vignette","film_grain"],
+    },
+    "abstract": {
+        "name": "Abstract", "emoji": "🎨",
+        "desc": "Flowing color, geometry & motion",
+        "scenes": ["abstract","music"],
+        "music": "upbeat", "camera": "orbit",
+        "effects": ["vignette","bloom"],
+    },
+    "fantasy": {
+        "name": "Fantasy", "emoji": "✨",
+        "desc": "Magical glow, particles & wonder",
+        "scenes": ["abstract","forest","sunset","snow"],
+        "music": "cinematic", "camera": "slow_zoom",
+        "effects": ["bloom","warm_grade","vignette"],
+    },
+    "retro": {
+        "name": "Retro", "emoji": "📺",
+        "desc": "VHS scanlines, film & vintage vibes",
+        "scenes": ["sunset","city","music","ocean"],
+        "music": "jazz", "camera": "handheld",
+        "effects": ["vhs","film_grain"],
+    },
+}
+
+# ── camera movement functions ──────────────────────────────────────────────────
+
+def _cam_slow_zoom(img, W, H, t):
+    scale = 1.0 + t * 0.10
+    nw, nh = max(W, int(W*scale)), max(H, int(H*scale))
+    img = img.resize((nw, nh), Image.BILINEAR)
+    x, y = (nw-W)//2, (nh-H)//2
+    return img.crop((x, y, x+W, y+H))
+
+def _cam_zoom_out(img, W, H, t):
+    scale = 1.10 - t * 0.10
+    nw, nh = max(W, int(W*scale)), max(H, int(H*scale))
+    img = img.resize((nw, nh), Image.BILINEAR)
+    x, y = (nw-W)//2, (nh-H)//2
+    return img.crop((x, y, x+W, y+H))
+
+def _cam_pan(img, W, H, t):
+    extra = max(1, int(W*0.12))
+    img = img.resize((W+extra, H), Image.BILINEAR)
+    x = int(t * extra)
+    return img.crop((x, 0, x+W, H))
+
+def _cam_dolly(img, W, H, t):
+    ew, eh = max(1, int(W*0.12)), max(1, int(H*0.12))
+    img = img.resize((W+ew, H+eh), Image.BILINEAR)
+    x, y = int(t*ew), int(t*eh)
+    return img.crop((x, y, x+W, y+H))
+
+def _cam_handheld(img, W, H, t):
+    pad = 14
+    img = img.resize((W+pad*2, H+pad*2), Image.BILINEAR)
+    rng = np.random.default_rng(int(t*30) % (2**31))
+    dx = int(rng.integers(-pad//2, pad//2+1))
+    dy = int(rng.integers(-pad//3, pad//3+1))
+    return img.crop((pad+dx, pad+dy, pad+dx+W, pad+dy+H))
+
+def _cam_orbit(img, W, H, t):
+    angle = math.sin(t*2*math.pi) * 2.8
+    return img.rotate(angle, resample=Image.BILINEAR, expand=False)
+
+_CAMERAS = {
+    "slow_zoom": _cam_slow_zoom,
+    "zoom_out":  _cam_zoom_out,
+    "pan":       _cam_pan,
+    "dolly":     _cam_dolly,
+    "handheld":  _cam_handheld,
+    "orbit":     _cam_orbit,
+    "static":    None,
+}
+
+# ── post-processing effects ────────────────────────────────────────────────────
+
+def _fx_letterbox(img, W, H):
+    draw = ImageDraw.Draw(img)
+    bar = int(H * 0.115)
+    draw.rectangle([0, 0, W, bar], fill=(0,0,0))
+    draw.rectangle([0, H-bar, W, H], fill=(0,0,0))
+    return img
+
+def _fx_film_grain(img, W, H, seed):
+    arr = np.array(img).astype(np.float32)
+    grain = np.random.default_rng(seed % (2**31)).standard_normal((H,W)).astype(np.float32)*5
+    for c in range(3):
+        arr[:,:,c] = np.clip(arr[:,:,c]+grain, 0, 255)
+    return Image.fromarray(arr.astype(np.uint8))
+
+def _fx_vignette(img, W, H, strength=0.60):
+    arr = np.array(img).astype(np.float32)
+    cx, cy = W/2, H/2
+    Y, X = np.mgrid[0:H, 0:W]
+    dist = np.sqrt(((X-cx)/cx)**2+((Y-cy)/cy)**2)
+    mask = (1-np.clip(dist*strength, 0, 1))[:,:,None]
+    return Image.fromarray(np.clip(arr*mask, 0, 255).astype(np.uint8))
+
+def _fx_vhs(img, W, H, t):
+    arr = np.array(img)
+    sh = max(1, int(abs(math.sin(t*7.3))*4)+1)
+    out = arr.copy()
+    out[:, sh:,  0] = arr[:, :-sh, 0]
+    out[:, :-sh, 2] = arr[:, sh:,  2]
+    for y in range(0, H, 5):
+        out[y] = np.clip(out[y].astype(np.int16)-20, 0, 255).astype(np.uint8)
+    noise = (np.random.default_rng(int(t*100)%2**31).random((H,W))*18-9).astype(np.int16)
+    for c in range(3):
+        out[:,:,c] = np.clip(out[:,:,c].astype(np.int16)+noise, 0, 255).astype(np.uint8)
+    return Image.fromarray(out)
+
+def _fx_warm_grade(img, W, H):
+    arr = np.array(img).astype(np.float32)
+    arr[:,:,0] = np.clip(arr[:,:,0]*1.09+8, 0, 255)
+    arr[:,:,1] = np.clip(arr[:,:,1]*1.02,   0, 255)
+    arr[:,:,2] = np.clip(arr[:,:,2]*0.88,   0, 255)
+    return Image.fromarray(arr.astype(np.uint8))
+
+def _fx_cool_grade(img, W, H):
+    arr = np.array(img).astype(np.float32)
+    arr[:,:,0] = np.clip(arr[:,:,0]*0.88,   0, 255)
+    arr[:,:,2] = np.clip(arr[:,:,2]*1.14+10, 0, 255)
+    return Image.fromarray(arr.astype(np.uint8))
+
+def _fx_bloom(img, W, H):
+    arr = np.array(img).astype(np.float32)
+    bright = np.clip(arr-175, 0, 80).astype(np.uint8)
+    glow = Image.fromarray(bright).filter(ImageFilter.GaussianBlur(radius=14))
+    glow_arr = np.array(glow).astype(np.float32)*0.55
+    return Image.fromarray(np.clip(arr+glow_arr, 0, 255).astype(np.uint8))
+
+_FX = {
+    "letterbox":  _fx_letterbox,
+    "film_grain": _fx_film_grain,
+    "vignette":   _fx_vignette,
+    "vhs":        _fx_vhs,
+    "warm_grade": _fx_warm_grade,
+    "cool_grade": _fx_cool_grade,
+    "bloom":      _fx_bloom,
+}
+
+def _apply_effects(frame, effects, W, H, t, frame_idx):
+    for fx in effects:
+        if fx == "film_grain":
+            frame = _fx_film_grain(frame, W, H, frame_idx)
+        elif fx == "vhs":
+            frame = _fx_vhs(frame, W, H, t)
+        elif fx in _FX:
+            frame = _FX[fx](frame, W, H)
+    return frame
+
+# ── audio helpers ──────────────────────────────────────────────────────────────
+
+_SR = 44100
+_MN = {
+    "C2":65.41,"G2":98.00,"A2":110.00,"Bb2":116.54,
+    "C3":130.81,"D3":146.83,"E3":164.81,"F3":174.61,"G3":196.00,"A3":220.00,"Bb3":233.08,"B3":246.94,
+    "C4":261.63,"D4":293.66,"Eb4":311.13,"E4":329.63,"F4":349.23,"F#4":369.99,
+    "G4":392.00,"Ab4":415.30,"A4":440.00,"Bb4":466.16,"B4":493.88,
+    "C5":523.25,"D5":587.33,"Eb5":622.25,"E5":659.25,"F5":698.46,"G5":783.99,"A5":880.00,
+}
+
+def _mt(dur):
+    return np.linspace(0, dur, max(1, int(dur*_SR)), endpoint=False)
+
+def _menv(n, atk=0.008, rel=0.12, dr=0.0):
+    e = np.ones(n, dtype=np.float32)
+    a = min(int(atk*_SR), n//4); r = min(int(rel*_SR), n//4)
+    if a>0: e[:a]=np.linspace(0,1,a)
+    if r>0: e[-r:]=np.linspace(1,0,r)
+    if dr>0:
+        t=np.linspace(0,n/_SR,n); e*=np.exp(-t*dr).astype(np.float32)
+    return e
+
+def _piano(f,d,amp=0.55):
+    t=_mt(d); n=len(t)
+    w=(np.sin(2*np.pi*f*t)+0.50*np.sin(4*np.pi*f*t)+0.25*np.sin(6*np.pi*f*t)+0.10*np.sin(8*np.pi*f*t)).astype(np.float32)
+    return w*_menv(n,atk=0.006,rel=0.04,dr=5.0)*amp*0.4
+
+def _pad(freqs,d,amp=0.18):
+    t=_mt(d); n=len(t); w=np.zeros(n,dtype=np.float32)
+    for f in freqs:
+        w+=np.sin(2*np.pi*f*t).astype(np.float32)
+        w+=(0.5*np.sin(2*np.pi*f*1.006*t)).astype(np.float32)
+        w+=(0.25*np.sin(4*np.pi*f*t)).astype(np.float32)
+    return w/max(len(freqs),1)*_menv(n,atk=0.18,rel=0.22)*amp
+
+def _bass(f,d,amp=0.50):
+    t=_mt(d); n=len(t)
+    w=(np.sin(2*np.pi*f*t)+0.6*np.sin(4*np.pi*f*t)+0.2*np.sin(6*np.pi*f*t)).astype(np.float32)
+    return w*_menv(n,atk=0.004,rel=0.06,dr=3.5)*amp*0.35
+
+def _synth_bass(f,d,amp=0.55):
+    t=_mt(d); n=len(t)
+    w=sum(np.sin(2*np.pi*f*k*t)/k for k in range(1,8)).astype(np.float32)
+    return w*_menv(n,atk=0.003,rel=0.03,dr=2.0)*amp*0.18
+
+def _kick(dur=0.35):
+    n=max(1,int(dur*_SR)); t=np.linspace(0,dur,n,endpoint=False)
+    freq=100*np.exp(-t*35)+45; phase=np.cumsum(freq)*2*np.pi/_SR
+    return np.sin(phase).astype(np.float32)*np.exp(-t*14).astype(np.float32)*0.80
+
+def _snare(dur=0.18):
+    n=max(1,int(dur*_SR)); t=np.linspace(0,dur,n,endpoint=False)
+    noise=np.random.default_rng(42).standard_normal(n).astype(np.float32)*0.55
+    tone=(np.sin(2*np.pi*195*t)*0.45).astype(np.float32)
+    return (noise+tone)*np.exp(-t*28).astype(np.float32)*0.55
+
+def _hihat(dur=0.04,amp=0.18):
+    n=max(1,int(dur*_SR)); t=np.linspace(0,dur,n,endpoint=False)
+    return np.random.default_rng(7).standard_normal(n).astype(np.float32)*np.exp(-t*55).astype(np.float32)*amp
+
+def _mplace(buf,seg,pos):
+    end=min(pos+len(seg),len(buf))
+    if pos<end: buf[pos:end]+=seg[:end-pos]
+
+def _mloop_mel(buf,seq,fn):
+    pos=idx=0
+    while pos<len(buf):
+        note,dur=seq[idx%len(seq)]; seg=fn(_MN[note],dur)
+        _mplace(buf,seg,pos); pos+=len(seg); idx+=1
+
+def _mloop_drums(buf,pat_n,kicks,snares,hat_div=None,hat_amp=0.18):
+    k=_kick(); s=_snare(); pos=0
+    while pos<len(buf):
+        for b in kicks:  _mplace(buf,k,pos+int(b*pat_n))
+        for b in snares: _mplace(buf,s,pos+int(b*pat_n))
+        if hat_div:
+            for i in range(hat_div): _mplace(buf,_hihat(amp=hat_amp),pos+int(i/hat_div*pat_n))
+        pos+=pat_n
+
+def _mloop_bass(buf,notes,beat_n):
+    for i in range(len(buf)//beat_n+1):
+        _mplace(buf,_bass(_MN[notes[i%len(notes)]],beat_n/_SR),i*beat_n)
+
+def _mloop_pad(buf,chords,chord_n):
+    for i in range(len(buf)//chord_n+1):
+        _mplace(buf,_pad(chords[i%len(chords)],chord_n/_SR),i*chord_n)
+
+def _music_upbeat(tot):
+    buf=np.zeros(tot,dtype=np.float32); beat=int(0.5*_SR)
+    mel=[("C4",.25),("E4",.25),("G4",.25),("C5",.25),("B4",.25),("G4",.25),("E4",.25),("C4",.25),
+         ("D4",.25),("F4",.25),("A4",.5),("G4",.25),("E4",.25),("C5",.5),("G4",.5)]
+    _mloop_mel(buf,mel,lambda f,d:_piano(f,d,0.60))
+    _mloop_pad(buf,[[_MN["C4"],_MN["E4"],_MN["G4"]],[_MN["G3"],_MN["B3"],_MN["D4"]],
+                    [_MN["A3"],_MN["C4"],_MN["E4"]],[_MN["F3"],_MN["A3"],_MN["C4"]]],beat*4)
+    _mloop_bass(buf,["C3","G3","A3","F3"],beat*2)
+    _mloop_drums(buf,beat*2,[0,0.5],[0.25,0.75],hat_div=8,hat_amp=0.15)
+    return buf
+
+def _music_calm(tot):
+    buf=np.zeros(tot,dtype=np.float32); beat=int(0.75*_SR)
+    mel=[("G4",1.0),("B4",.5),("D5",.5),("E4",1.0),("G4",.5),("B4",.5),
+         ("C4",1.0),("E4",.5),("G4",.5),("D4",1.0),("F#4",.5),("A4",.5)]
+    _mloop_mel(buf,mel,lambda f,d:_piano(f,d,0.45))
+    _mloop_pad(buf,[[_MN["G3"],_MN["B3"],_MN["D4"]],[_MN["E3"],_MN["G3"],_MN["B3"]],
+                    [_MN["C3"],_MN["E3"],_MN["G3"]],[_MN["D3"],_MN["F#4"],_MN["A3"]]],beat*4)
+    _mloop_bass(buf,["G2","A2","C3","G2"],beat*4)
+    return buf
+
+def _music_epic(tot):
+    buf=np.zeros(tot,dtype=np.float32); beat=int(0.63*_SR)
+    mel=[("D4",.5),("D4",.25),("A4",.75),("Bb4",.5),("A4",.5),("F4",.5),("F4",.25),
+         ("C5",.75),("Bb4",.5),("A4",.5),("G4",.5),("G4",.25),("D5",1.0),("C5",.5),("Bb4",.5),("A4",1.0)]
+    _mloop_mel(buf,mel,lambda f,d:_piano(f,d,0.70))
+    _mloop_pad(buf,[[_MN["D4"],_MN["F4"],_MN["A4"]],[_MN["Bb3"],_MN["D4"],_MN["F4"]],
+                    [_MN["F3"],_MN["A3"],_MN["C4"]],[_MN["C4"],_MN["E4"],_MN["G4"]]],beat*4)
+    _mloop_bass(buf,["D3","Bb2","G2","C3"],beat*2)
+    _mloop_drums(buf,beat*4,[0,0.375,0.5,0.875],[0.25,0.75],hat_div=8,hat_amp=0.12)
+    return buf
+
+def _music_cinematic(tot):
+    buf=np.zeros(tot,dtype=np.float32); beat=int(1.09*_SR)
+    mel=[("C4",2.0),("E4",1.5),("G4",1.5),("F4",2.0),("A4",1.5),("G4",1.5),("E4",2.0),("G4",1.5),("C5",3.0)]
+    _mloop_mel(buf,mel,lambda f,d:_piano(f,d,0.50))
+    _mloop_pad(buf,[[_MN["C3"],_MN["E4"],_MN["G4"]],[_MN["F3"],_MN["A3"],_MN["C4"]],
+                    [_MN["G3"],_MN["B3"],_MN["D4"]],[_MN["A3"],_MN["C4"],_MN["E4"]]],beat*4)
+    _mloop_bass(buf,["C3","F3","G3","A3"],beat*4)
+    return buf
+
+def _music_electronic(tot):
+    buf=np.zeros(tot,dtype=np.float32); beat=int(0.469*_SR)
+    arp=[("C4",.125),("E4",.125),("G4",.125),("Bb4",.125),("G4",.125),("E4",.125),("C5",.125),("G4",.125)]
+    _mloop_mel(buf,arp,lambda f,d:_piano(f,d*0.8,0.45))
+    _mloop_pad(buf,[[_MN["C4"],_MN["G4"]],[_MN["A3"],_MN["E4"]],
+                    [_MN["F3"],_MN["C4"]],[_MN["G3"],_MN["D4"]]],beat*4)
+    pos=0
+    while pos<len(buf):
+        _mplace(buf,_synth_bass(_MN["C3"],0.469,0.65),pos); pos+=beat
+    _mloop_drums(buf,beat*4,[0,0.25,0.5,0.75],[0.25,0.75],hat_div=8,hat_amp=0.10)
+    return buf
+
+def _music_jazz(tot):
+    np.random.seed(12); buf=np.zeros(tot,dtype=np.float32); beat=int(0.60*_SR)
+    hat=_hihat(amp=0.14); pos=0
+    while pos<len(buf):
+        _mplace(buf,hat,pos); _mplace(buf,hat,pos+int(0.335*beat)); pos+=beat
+    mel=[("C4",.375),("E4",.125),("G4",.25),("Bb4",.25),("A4",.375),("F#4",.125),("E4",.25),("G4",.25),
+         ("D4",.375),("F4",.125),("Ab4",.25),("C5",.25),("Bb4",.375),("G4",.125),("E4",.25),("C4",.5)]
+    _mloop_mel(buf,mel,lambda f,d:_piano(f,d,0.55))
+    _mloop_pad(buf,[[_MN["C4"],_MN["E4"],_MN["G4"],_MN["Bb4"]],[_MN["A3"],_MN["C4"],_MN["E4"],_MN["G4"]],
+                    [_MN["D4"],_MN["F4"],_MN["A4"],_MN["C5"]],[_MN["G3"],_MN["B3"],_MN["D4"],_MN["F4"]]],beat*4)
+    _mloop_bass(buf,["C3","A3","D3","G3"],beat*2)
+    return buf
+
+_MUSIC_RENDERERS = {
+    "upbeat":    _music_upbeat,
+    "calm":      _music_calm,
+    "epic":      _music_epic,
+    "cinematic": _music_cinematic,
+    "electronic":_music_electronic,
+    "jazz":      _music_jazz,
+}
+
+def _gen_music(style: str, duration: float, out_path: str):
+    renderer = _MUSIC_RENDERERS.get(style, _music_upbeat)
+    total    = int(duration * _SR)
+    buf      = renderer(total)
+    delay    = int(0.055 * _SR)
+    rev      = np.zeros(total, dtype=np.float32)
+    rev[delay:] = buf[:total-delay] * 0.18
+    audio    = buf + rev
+    peak     = np.max(np.abs(audio))
+    if peak > 0: audio *= 0.80 / peak
+    audio = np.clip(audio, -1.0, 1.0)
+    with wave.open(out_path, "w") as wf:
+        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(_SR)
+        wf.writeframes((audio * 32767).astype(np.int16).tobytes())
+    return out_path
+
+def _fix_sign(v: str) -> str:
+    v = v.strip()
+    return v if v and v[0] in ("+","-") else "+"+v
+
+async def _tts(text, voice, rate, pitch, out_path):
+    await edge_tts.Communicate(text=text, voice=voice,
+                                rate=_fix_sign(rate), pitch=_fix_sign(pitch)).save(out_path)
+
+def _mix_audio(raw_video, voice_path, music_path, out_path, music_vol):
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    if not voice_path and not music_path:
+        os.replace(raw_video, out_path); return
+    if voice_path and music_path:
+        mixed = out_path.replace(".mp4","_mix.wav")
+        subprocess.run([ffmpeg,"-y","-i",voice_path,"-i",music_path,"-filter_complex",
+            f"[0:a]volume=1.0[v];[1:a]volume={music_vol:.2f}[m];[v][m]amix=inputs=2:duration=longest",
+            "-ac","2",mixed], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        audio_in = mixed
+    else:
+        audio_in = voice_path or music_path
+    subprocess.run([ffmpeg,"-y","-i",raw_video,"-i",audio_in,
+        "-map","0:v","-map","1:a","-c:v","copy","-c:a","aac","-shortest",out_path],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if voice_path and music_path:
+        mixed = out_path.replace(".mp4","_mix.wav")
+        if os.path.exists(mixed): os.remove(mixed)
+
 # ── generation pipeline ────────────────────────────────────────────────────────
 
 def _run_generation(task_id: str, req: VideoRequest):
     try:
         W, H  = req.width, req.height
         total = req.num_frames
+
+        # resolve agent
+        agent_cfg = _AGENTS.get(req.agent) if req.agent != "auto" else None
+
+        # scene detection constrained to agent's scenes
         scene = _detect(req.prompt)
-        fn    = _SCENES[scene]
+        if agent_cfg and scene not in agent_cfg["scenes"]:
+            scene = agent_cfg["scenes"][0]
+        fn = _SCENES[scene]
 
-        _tasks[task_id].update({"status": "generating", "progress": 5, "scene": scene})
+        # camera function
+        cam_name = "static"
+        if req.camera_movement != "auto":
+            cam_name = req.camera_movement
+        elif agent_cfg:
+            cam_name = agent_cfg.get("camera", "static")
+        cam_fn = _CAMERAS.get(cam_name)
 
-        out_path = f"outputs/videos/{uuid.uuid4()}.mp4"
-        writer   = imageio.get_writer(
-            out_path, fps=req.fps, codec="libx264",
-            output_params=["-crf","20","-preset","fast","-pix_fmt","yuv420p"],
-        )
+        # post-processing effects
+        effects = agent_cfg["effects"] if agent_cfg else []
 
+        uid   = str(uuid.uuid4())
+        raw   = f"outputs/videos/{uid}_raw.mp4"
+        final = f"outputs/videos/{uid}.mp4"
+
+        _tasks[task_id].update({"status":"rendering","progress":5,"scene":scene,"agent":req.agent})
+
+        writer = imageio.get_writer(raw, fps=req.fps, codec="libx264",
+                    output_params=["-crf","23","-preset","medium","-pix_fmt","yuv420p"])
         for i in range(total):
             t     = i / max(total-1, 1)
             frame = fn(W, H, t)
+            if cam_fn:
+                frame = cam_fn(frame, W, H, t)
+            frame = _apply_effects(frame, effects, W, H, t, i)
             frame = _subtitle(frame, req.prompt, W, H)
             writer.append_data(np.array(frame))
-            _tasks[task_id]["progress"] = 5 + int(88 * i / total)
-
+            _tasks[task_id]["progress"] = 5 + int(58 * i / total)
         writer.close()
+
+        # voice
+        voice_path = None
+        if req.voice_enabled:
+            _tasks[task_id].update({"status":"generating voice","progress":65})
+            narrate = req.voice_text.strip() or req.prompt
+            voice_path = f"outputs/videos/{uid}_voice.mp3"
+            asyncio.run(_tts(narrate, req.voice_name,
+                             _fix_sign(req.voice_rate), _fix_sign(req.voice_pitch), voice_path))
+
+        # music
+        music_path = None
+        if req.music_enabled:
+            _tasks[task_id].update({"status":"composing music","progress":75})
+            if req.music_style != "auto":
+                style = req.music_style
+            elif agent_cfg:
+                style = agent_cfg.get("music", "upbeat")
+            else:
+                style = _SCENE_MUSIC.get(scene, "upbeat")
+            music_path = f"outputs/videos/{uid}_music.wav"
+            _gen_music(style, total/req.fps + 1.5, music_path)
+
+        # combine
+        _tasks[task_id].update({"status":"mixing audio","progress":88})
+        _mix_audio(raw, voice_path, music_path, final, req.music_volume)
+
+        # cleanup raw + temp audio
+        for f in [raw, voice_path, music_path]:
+            if f and f != final and os.path.exists(f):
+                try: os.remove(f)
+                except: pass
+
         _tasks[task_id].update({
-            "status":   "completed",
-            "progress": 100,
-            "result":   f"/outputs/videos/{os.path.basename(out_path)}",
+            "status":"completed","progress":100,
+            "result":f"/outputs/videos/{uid}.mp4",
         })
 
     except Exception as e:
         _tasks[task_id].update({"status":"failed","progress":0,"error":str(e),"result":None})
+
+
+@router.get("/agents")
+def list_agents():
+    return {"agents": [
+        {"id": k, "name": v["name"], "emoji": v["emoji"], "desc": v["desc"],
+         "music": v["music"], "camera": v["camera"], "effects": v["effects"]}
+        for k, v in _AGENTS.items()
+    ]}
 
 
 @router.post("/generate")

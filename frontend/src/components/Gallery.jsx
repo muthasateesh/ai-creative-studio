@@ -20,6 +20,7 @@ export default function Gallery({ api }) {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all')
+  const [deleting, setDeleting] = useState(null)
 
   const load = async () => {
     setLoading(true)
@@ -34,6 +35,18 @@ export default function Gallery({ api }) {
   }
 
   useEffect(() => { load() }, [])
+
+  const deleteItem = async (item) => {
+    setDeleting(item.url)
+    try {
+      await axios.delete(`${api}/api/gallery/${item.type}/${item.filename}`)
+      setItems(prev => prev.filter(i => i.url !== item.url))
+    } catch {
+      // ignore — file may already be gone
+    } finally {
+      setDeleting(null)
+    }
+  }
 
   const filtered = filter === 'all' ? items : items.filter(i => i.type === filter)
 
@@ -104,7 +117,7 @@ export default function Gallery({ api }) {
                 )}
 
                 {/* Overlay */}
-                <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-3 p-3">
+                <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2 p-3">
                   {(item.type === 'voice' || item.type === 'audio') && (
                     <audio src={`${api}${item.url}`} controls className="w-full" />
                   )}
@@ -112,6 +125,12 @@ export default function Gallery({ api }) {
                     className="flex items-center gap-2 bg-white/20 hover:bg-white/30 backdrop-blur px-3 py-2 rounded-xl text-white text-sm font-medium transition-all w-full justify-center">
                     <Download size={14} /> Download
                   </a>
+                  <button
+                    onClick={() => deleteItem(item)}
+                    disabled={deleting === item.url}
+                    className="flex items-center gap-2 bg-red-500/30 hover:bg-red-500/50 backdrop-blur px-3 py-2 rounded-xl text-red-300 text-sm font-medium transition-all w-full justify-center disabled:opacity-50">
+                    <Trash2 size={14} /> {deleting === item.url ? 'Deleting…' : 'Delete'}
+                  </button>
                 </div>
 
                 {/* Type badge */}
