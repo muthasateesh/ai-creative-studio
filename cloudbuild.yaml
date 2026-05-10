@@ -1,0 +1,56 @@
+substitutions:
+  _REGION:  us-central1
+  _SERVICE: ai-creative-studio
+  _BUCKET:  ${PROJECT_ID}-aics-outputs   # GCS bucket for persistent outputs
+
+steps:
+  # 1. Build Docker image
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - gcr.io/$PROJECT_ID/$_SERVICE:$SHORT_SHA
+      - -t
+      - gcr.io/$PROJECT_ID/$_SERVICE:latest
+      - .
+
+  # 2. Push to Container Registry
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - gcr.io/$PROJECT_ID/$_SERVICE
+
+  # 3. Deploy to Cloud Run with GCS volume for persistent outputs
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - $_SERVICE
+      - --image=gcr.io/$PROJECT_ID/$_SERVICE:$SHORT_SHA
+      - --region=$_REGION
+      - --platform=managed
+      - --allow-unauthenticated
+      - --memory=4Gi
+      - --cpu=2
+      - --concurrency=5
+      - --timeout=900
+      - --min-instances=0
+      - --max-instances=3
+      - --add-volume=name=outputs,type=cloud-storage,bucket=$_BUCKET
+      - --add-volume-mount=volume=outputs,mount-path=/app/backend/outputs
+      - --quiet
+
+images:
+  - gcr.io/$PROJECT_ID/$_SERVICE
+
+# Allow up to 30 min for the first build (pip install + npm ci)
+timeout: 1800s
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8

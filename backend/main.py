@@ -31,7 +31,8 @@ app.include_router(voice.router, prefix="/api/voice", tags=["Voice"])
 app.include_router(audio.router, prefix="/api/audio", tags=["Audio"])
 app.include_router(animate.router, prefix="/api/animate", tags=["Animate"])
 
-FRONTEND_DIST_DIR = "../frontend/dist"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIST_DIR = os.path.join(_HERE, "..", "frontend", "dist")
 if os.path.isdir(FRONTEND_DIST_DIR):
     app.mount("/", StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name="frontend")
 
@@ -83,4 +84,5 @@ def spa_fallback(full_path: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

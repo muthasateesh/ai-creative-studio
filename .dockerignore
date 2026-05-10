@@ -6,7 +6,20 @@
 **/*.pyd
 **/.pytest_cache
 **/.mypy_cache
-frontend/node_modules
-frontend/dist
-backend/outputs
+
+# Python virtual environment (100MB+)
+backend/venv/
+
+# Generated outputs — don't bake into the image
+backend/outputs/
+
+# Local experiment scripts and generated video files
 backend/*.mp4
+backend/generate_humpty*.py
+backend/combine*.py
+backend/humpty*.mp4
+
+# Node modules and build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/dist-electron/
