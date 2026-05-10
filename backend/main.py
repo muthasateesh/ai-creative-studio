@@ -8,6 +8,8 @@ os.makedirs("outputs/images", exist_ok=True)
 os.makedirs("outputs/videos", exist_ok=True)
 os.makedirs("outputs/voice", exist_ok=True)
 os.makedirs("outputs/audio", exist_ok=True)
+os.makedirs("outputs/animations", exist_ok=True)
+os.makedirs("outputs/uploads", exist_ok=True)
 
 app = FastAPI(title="AI Creative Studio", version="1.0.0")
 
@@ -20,12 +22,13 @@ app.add_middleware(
 
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
-from routers import images, videos, voice, audio
+from routers import images, videos, voice, audio, animate
 
 app.include_router(images.router, prefix="/api/images", tags=["Images"])
 app.include_router(videos.router, prefix="/api/videos", tags=["Videos"])
 app.include_router(voice.router, prefix="/api/voice", tags=["Voice"])
 app.include_router(audio.router, prefix="/api/audio", tags=["Audio"])
+app.include_router(animate.router, prefix="/api/animate", tags=["Animate"])
 
 
 @app.get("/api/health")
@@ -36,7 +39,7 @@ def health():
 @app.get("/api/gallery")
 def gallery():
     items = []
-    for category in ["images", "videos", "voice", "audio"]:
+    for category in ["images", "videos", "voice", "audio", "animations"]:
         folder = f"outputs/{category}"
         if os.path.exists(folder):
             for f in sorted(os.listdir(folder), reverse=True):

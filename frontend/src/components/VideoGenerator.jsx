@@ -71,18 +71,17 @@ export default function VideoGenerator({ api }) {
   }
 
   const statusLabel = {
-    queued: 'Queued...',
-    loading_model: 'Loading video AI model (first time ~3 min)...',
-    generating: 'Generating your video...',
-    completed: 'Done!',
-    failed: 'Failed',
+    queued:     'Queued…',
+    generating: 'Rendering scene frames…',
+    completed:  'Done!',
+    failed:     'Failed',
   }
 
   return (
     <div className="max-w-6xl mx-auto">
       <div className="mb-8">
         <h2 className="text-3xl font-bold gradient-text mb-2">AI Video Generator</h2>
-        <p className="text-white/50">Generate short AI videos from text using Zeroscope V2</p>
+        <p className="text-white/50">Generate animated scene videos from text — space, ocean, fire, city &amp; more</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -140,8 +139,8 @@ export default function VideoGenerator({ api }) {
 
           <div className="card bg-blue-950/20 border-blue-500/20">
             <p className="text-xs text-blue-300/70">
-              💡 <strong>Tips:</strong> Video generation takes 3-10 minutes per video.
-              First generation also downloads the model (~2.5GB). Keep descriptions motion-focused for best results.
+              💡 <strong>Tips:</strong> Generation completes in seconds. The scene is auto-detected from your prompt —
+              try keywords like <em>ocean, space, fire, snow, city, forest, music, digital</em> for themed visuals.
             </p>
           </div>
 

@@ -1,11 +1,12 @@
-import { Image, Video, Mic, Music, Grid, Sparkles } from 'lucide-react'
+import { Image, Video, Mic, Music, Grid, Sparkles, Wand2 } from 'lucide-react'
 
 const tabs = [
-  { id: 'images', label: 'AI Images', icon: Image, color: 'from-purple-500 to-pink-500', desc: 'Text to image' },
-  { id: 'videos', label: 'AI Videos', icon: Video, color: 'from-blue-500 to-cyan-500', desc: 'Text to video' },
-  { id: 'voice', label: 'Voice Over', icon: Mic, color: 'from-green-500 to-teal-500', desc: 'Text to speech' },
-  { id: 'audio', label: 'Music & SFX', icon: Music, color: 'from-orange-500 to-red-500', desc: 'AI audio' },
-  { id: 'gallery', label: 'Gallery', icon: Grid, color: 'from-indigo-500 to-purple-500', desc: 'Your creations' },
+  { id: 'images',  label: 'AI Images',  icon: Image,  color: 'from-purple-500 to-pink-500',  desc: 'Text to image' },
+  { id: 'videos',  label: 'AI Videos',  icon: Video,  color: 'from-blue-500 to-cyan-500',    desc: 'Text to video' },
+  { id: 'animate', label: 'Animate',    icon: Wand2,  color: 'from-pink-500 to-orange-500',  desc: 'Image to video' },
+  { id: 'voice',   label: 'Voice Over', icon: Mic,    color: 'from-green-500 to-teal-500',   desc: 'Text to speech' },
+  { id: 'audio',   label: 'Music & SFX',icon: Music,  color: 'from-orange-500 to-red-500',   desc: 'AI audio' },
+  { id: 'gallery', label: 'Gallery',    icon: Grid,   color: 'from-indigo-500 to-purple-500',desc: 'Your creations' },
 ]
 
 export default function Sidebar({ activeTab, onTabChange }) {

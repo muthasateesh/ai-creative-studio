@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import Sidebar from './components/Sidebar'
 import ImageGenerator from './components/ImageGenerator'
 import VideoGenerator from './components/VideoGenerator'
+import ImageAnimator from './components/ImageAnimator'
 import VoiceGenerator from './components/VoiceGenerator'
 import AudioGenerator from './components/AudioGenerator'
 import Gallery from './components/Gallery'
@@ -30,12 +31,13 @@ export default function App() {
 
   const renderContent = () => {
     switch (activeTab) {
-      case 'images': return <ImageGenerator api={API} />
-      case 'videos': return <VideoGenerator api={API} />
-      case 'voice': return <VoiceGenerator api={API} />
-      case 'audio': return <AudioGenerator api={API} />
+      case 'images':  return <ImageGenerator api={API} />
+      case 'videos':  return <VideoGenerator api={API} />
+      case 'animate': return <ImageAnimator api={API} />
+      case 'voice':   return <VoiceGenerator api={API} />
+      case 'audio':   return <AudioGenerator api={API} />
       case 'gallery': return <Gallery api={API} />
-      default: return <ImageGenerator api={API} />
+      default:        return <ImageGenerator api={API} />
     }
   }
 
